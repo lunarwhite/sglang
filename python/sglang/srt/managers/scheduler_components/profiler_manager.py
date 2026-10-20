@@ -80,6 +80,7 @@ class SchedulerProfilerManager:
 
         self.profile_by_stage: bool = False
         self.profile_in_progress: bool = False
+        self.profile_auto_stopped: bool = False
         self.merge_profiles = False
         self.detailed_annotations: bool = False
 
@@ -124,6 +125,7 @@ class SchedulerProfilerManager:
                 message="Profiling is already in progress. Call /stop_profile first.",
             )
 
+        self.profile_auto_stopped = False
         self.profile_by_stage = profile_by_stage
         self.merge_profiles = merge_profiles
 
@@ -173,6 +175,8 @@ class SchedulerProfilerManager:
         if envs.SGLANG_PROFILE_V2.get():
             self._apply_detailed_annotations(self.detailed_annotations)
             return self._profile_manager.manual_start()
+
+        self.profile_auto_stopped = False
 
         stage_str = f" for {stage.name}" if stage else ""
         logger.info(
@@ -316,13 +320,22 @@ class SchedulerProfilerManager:
             return merge_message
 
     def _stop_profile(
-        self, stage: Optional[ForwardMode] = None
+        self, stage: Optional[ForwardMode] = None, auto: bool = False
     ) -> ProfileReqOutput | None:
         if envs.SGLANG_PROFILE_V2.get():
             self._apply_detailed_annotations(False)
             return self._profile_manager.manual_stop()
 
         if not self.profile_in_progress:
+            if self.profile_auto_stopped:
+                return ProfileReqOutput(
+                    success=True,
+                    message=(
+                        "Profiling is not in progress: it already stopped "
+                        "automatically after the requested number of steps. "
+                        "Call /start_profile to start a new profile."
+                    ),
+                )
             return ProfileReqOutput(
                 success=False,
                 message="Profiling is not in progress. Call /start_profile first.",
@@ -405,6 +418,7 @@ class SchedulerProfilerManager:
             gc.collect()
 
         self.profile_in_progress = False
+        self.profile_auto_stopped = auto
         self.profiler_start_forward_ct = None
 
         self._apply_detailed_annotations(False)
@@ -422,7 +436,7 @@ class SchedulerProfilerManager:
                 self.profiler_prefill_ct += 1
                 if self.profiler_prefill_ct > self.profiler_target_prefill_ct:
                     if self.profile_in_progress:
-                        self._stop_profile(stage=ForwardMode.EXTEND)
+                        self._stop_profile(stage=ForwardMode.EXTEND, auto=True)
             elif batch.forward_mode.is_decode():
                 if self.profiler_decode_ct == 0:
                     if self.profile_in_progress:
@@ -436,7 +450,7 @@ class SchedulerProfilerManager:
                 self.profiler_decode_ct += 1
                 if self.profiler_decode_ct > self.profiler_target_decode_ct:
                     if self.profile_in_progress:
-                        self._stop_profile(stage=ForwardMode.DECODE)
+                        self._stop_profile(stage=ForwardMode.DECODE, auto=True)
             elif batch.forward_mode.is_idle() or batch.forward_mode.is_prebuilt():
                 # PREBUILT is the disaggregated-decode placeholder for requests
                 # whose KV just arrived; it never enters a model forward.
@@ -449,7 +463,7 @@ class SchedulerProfilerManager:
                 self.profiler_target_forward_ct
                 and self.profiler_target_forward_ct <= self.get_forward_ct()
             ):
-                self._stop_profile()
+                self._stop_profile(auto=True)
             if (
                 self.profiler_start_forward_ct
                 and self.profiler_start_forward_ct == self.get_forward_ct()
